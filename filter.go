@@ -15,7 +15,7 @@ type CopyFilter interface {
 	// the columns to be selected, table being copied, the last primary key value
 	// from the previous batch, and the batch size. Call DefaultBuildSelect to
 	// generate the default query, which may be used as a starting point.
-	BuildSelect([]string, *TableSchema, uint64, uint64) (sq.SelectBuilder, error)
+	BuildSelect([]string, *TableSchema, uint64, uint64) (sq.SelectBuilder, bool, error)
 
 	// ApplicableEvent is used to filter events for rows that have been
 	// filtered in ConstrainSelect. ApplicableEvent should return true if the
@@ -29,3 +29,4 @@ type TableFilter interface {
 	ApplicableTables([]*TableSchema) ([]*TableSchema, error)
 	ApplicableDatabases([]string) ([]string, error)
 }
+

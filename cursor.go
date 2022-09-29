@@ -3,8 +3,9 @@ package ghostferry
 import (
 	sqlorig "database/sql"
 	"fmt"
-	sql "github.com/Shopify/ghostferry/sqlwrapper"
 	"strings"
+
+	sql "github.com/Shopify/ghostferry/sqlwrapper"
 
 	"github.com/Masterminds/squirrel"
 	"github.com/go-mysql-org/go-mysql/schema"
@@ -35,8 +36,8 @@ type CursorConfig struct {
 	DB        *sql.DB
 	Throttler Throttler
 
-	ColumnsToSelect           []string
-	BuildSelect               func([]string, *TableSchema, uint64, uint64) (squirrel.SelectBuilder, error)
+	ColumnsToSelect []string
+	BuildSelect     func([]string, *TableSchema, uint64, uint64) (squirrel.SelectBuilder, bool, error)
 	// BatchSize is a pointer to the BatchSize in Config.UpdatableConfig which can be independently updated from this code.
 	// Having it as a pointer allows the updated value to be read without needing additional code to copy the batch size value into the cursor config for each cursor we create.
 	BatchSize                 *uint64
@@ -94,10 +95,11 @@ func (c *Cursor) Each(f func(*RowBatch) error) error {
 		c.ColumnsToSelect = []string{"*"}
 	}
 
-	for c.lastSuccessfulPaginationKey < c.MaxPaginationKey {
+	for {
 		var tx SqlPreparerAndRollbacker
 		var batch *RowBatch
 		var paginationKeypos uint64
+		var doneIfEmpty bool
 
 		err := WithRetries(c.ReadRetries, 0, c.logger, "fetch rows", func() (err error) {
 			if c.Throttler != nil {
@@ -116,7 +118,7 @@ func (c *Cursor) Each(f func(*RowBatch) error) error {
 				tx = &SqlDBWithFakeRollback{c.DB}
 			}
 
-			batch, paginationKeypos, err = c.Fetch(tx)
+			batch, paginationKeypos, doneIfEmpty, err = c.Fetch(tx)
 			if err == nil {
 				return nil
 			}
@@ -130,16 +132,13 @@ func (c *Cursor) Each(f func(*RowBatch) error) error {
 		}
 
 		if batch.Size() == 0 {
-			tx.Rollback()
-			c.logger.Debug("did not reach max primary key, but the table is complete as there are no more rows")
-			break
-		}
+			if !doneIfEmpty {
+				tx.Rollback()
+				continue
+			}
 
-		if paginationKeypos <= c.lastSuccessfulPaginationKey {
 			tx.Rollback()
-			err = fmt.Errorf("new paginationKeypos %d <= lastSuccessfulPaginationKey %d", paginationKeypos, c.lastSuccessfulPaginationKey)
-			c.logger.WithError(err).Errorf("last successful paginationKey position did not advance")
-			return err
+			break
 		}
 
 		err = f(batch)
@@ -157,12 +156,12 @@ func (c *Cursor) Each(f func(*RowBatch) error) error {
 	return nil
 }
 
-func (c *Cursor) Fetch(db SqlPreparer) (batch *RowBatch, paginationKeypos uint64, err error) {
+func (c *Cursor) Fetch(db SqlPreparer) (batch *RowBatch, paginationKeypos uint64, doneIfEmpty bool, err error) {
 	var selectBuilder squirrel.SelectBuilder
 	batchSize := c.CursorConfig.GetBatchSize(c.Table.Schema, c.Table.Name)
 
 	if c.BuildSelect != nil {
-		selectBuilder, err = c.BuildSelect(c.ColumnsToSelect, c.Table, c.lastSuccessfulPaginationKey, batchSize)
+		selectBuilder, doneIfEmpty, err = c.BuildSelect(c.ColumnsToSelect, c.Table, c.lastSuccessfulPaginationKey, batchSize)
 		if err != nil {
 			c.logger.WithError(err).Error("failed to apply filter for select")
 			return
@@ -265,8 +264,6 @@ func (c *Cursor) Fetch(db SqlPreparer) (batch *RowBatch, paginationKeypos uint64
 		columns:            columns,
 	}
 
-	logger.Debugf("found %d rows", batch.Size())
-
 	return
 }
 
@@ -303,3 +300,4 @@ func DefaultBuildSelect(columns []string, table *TableSchema, lastPaginationKey,
 		Limit(batchSize).
 		OrderBy(quotedPaginationKey)
 }
+
